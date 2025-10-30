@@ -1,0 +1,33 @@
+steps:
+
+  - name: 'gcr.io/cloud-builders/docker'
+
+    args: ['build', '-t', 'us-central1-docker.pkg.dev/$PROJECT_ID/$_REPOSITORY_NAME/$_IMAGE_NAME', '.']
+
+ 
+
+  - name: 'gcr.io/cloud-builders/docker'
+
+    args: ['push', 'us-central1-docker.pkg.dev/$PROJECT_ID/$_REPOSITORY_NAME/$_IMAGE_NAME']
+
+ 
+
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+
+    entrypoint: gcloud
+
+    args:
+
+      [
+
+        'run','deploy','$_SERVICE_NAME',
+
+        '--image','us-central1-docker.pkg.dev/$PROJECT_ID/$_REPOSITORY_NAME/$_IMAGE_NAME',
+
+        '--region','us-central1',
+
+        '--port','$_PORT',
+
+        '--allow-unauthenticated'
+
+      ]
