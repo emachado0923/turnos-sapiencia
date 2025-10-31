@@ -1,9 +1,15 @@
 import streamlit as st
-from config.database import init_database
+from config.database import init_database, verificar_tabla_control
 from sqlalchemy import text
 
-# Inicializar base de datos al iniciar la app
-init_database()
+# Inicializar base de datos al iniciar la app - MÁS ROBUSTO
+try:
+    init_database()
+    # Verificar específicamente la tabla de control
+    verificar_tabla_control()
+    st.success("✅ Base de datos inicializada correctamente")
+except Exception as e:
+    st.error(f"❌ Error inicializando base de datos: {e}")
 
 # Configurar página principal
 st.set_page_config(

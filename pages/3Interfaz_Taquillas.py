@@ -2,10 +2,10 @@ import streamlit as st
 import pandas as pd
 from config.database import (
     get_db_engine, obtener_turnos_por_estado, 
-    obtener_personas_sin_turno, asignar_turnos_automaticos_silencioso,
+    sincronizar_y_obtener_personas_ordenadas, asignar_turnos_automaticos_silencioso,
     taquilla_tiene_turno_activo, obtener_turno_activo_taquilla,
     ya_tiene_turno_pendiente, obtener_siguiente_turno_lote,
-    ya_tiene_turno_pendiente_robusto, limpiar_cache_personas  # ← AGREGAR ESTOS
+    ya_tiene_turno_pendiente_robusto, limpiar_cache_personas
 )
 from utils.helpers import setup_page_config
 from sqlalchemy import text
@@ -14,13 +14,14 @@ from datetime import datetime
 setup_page_config("Interfaz de Taquillas", "wide")
 
 def asignar_turnos_rapido():
-    """Función rápida para asignar turnos - SOLO evita turnos pendientes simultáneos"""
+    """Función rápida para asignar turnos - USANDO TABLA DE CONTROL"""
     from config.database import limpiar_cache_personas
     
     # LIMPIAR CACHE ANTES DE ASIGNAR
     limpiar_cache_personas()
     
-    personas = obtener_personas_sin_turno()
+    # Obtener personas EN ORDEN CORRECTO desde la tabla de control
+    personas = sincronizar_y_obtener_personas_ordenadas()
     if not personas:
         print("🔍 No hay personas nuevas para asignar turnos")
         return 0
@@ -28,38 +29,32 @@ def asignar_turnos_rapido():
     turnos_asignados = 0
     engine = get_db_engine()
     
-    print(f"🔍 Procesando {len(personas)} personas de la lista externa")
+    print(f"🔍 Procesando {len(personas)} personas en ORDEN CORRECTO DE LLEGADA")
     
     for persona in personas:
-        if hasattr(persona, '_mapping'):
-            persona_dict = dict(persona._mapping)
-        else:
-            persona_dict = {
-                'nombre1': persona[0], 'nombre2': persona[1],
-                'apellido1': persona[2], 'apellido2': persona[3],
-                'documento': persona[4], 'tema_de_solicitud': persona[5]
-            }
+        # Ahora persona[0] es el ID, persona[5] es el documento, etc.
+        id_control = persona[0]  # ID de la tabla de control
+        documento = persona[5]   # Documento en posición [5]
         
-        cedula = persona_dict.get('documento', '')
+        # MANEJO SEGURO DE VALORES NULOS para nombres
+        nombre1 = str(persona[1]) if persona[1] is not None else ''
+        nombre2 = str(persona[2]) if persona[2] is not None else ''
+        apellido1 = str(persona[3]) if persona[3] is not None else ''
+        apellido2 = str(persona[4]) if persona[4] is not None else ''
         
-        # SOLO GUARDAR NOMBRE1 Y APELLIDO1
-        nombre1 = persona_dict.get('nombre1', '').strip()
-        apellido1 = persona_dict.get('apellido1', '').strip()
+        # Limpiar y formatear el nombre
+        nombre1 = nombre1.strip()
+        apellido1 = apellido1.strip()
         
         # Construir nombre simple: nombre1 + apellido1
         nombre_simple = f"{nombre1} {apellido1}".strip()
         
-        if not cedula:
-            print(f"⚠️ Persona sin cédula: {nombre_simple}")
-            continue
+        print(f"🔍 Procesando: ID {id_control} - Documento: {documento} - {nombre_simple}")
         
-        print(f"🔍 Verificando cédula: {cedula} - {nombre_simple}")
-        
-        # VERIFICACIÓN DETALLADA
-        engine_check = get_db_engine()
-        if engine_check:
+        # VERIFICACIÓN DETALLADA en turnos principales
+        if engine:
             try:
-                with engine_check.connect() as conn:
+                with engine.connect() as conn:
                     # Consulta COMPLETA de todos los turnos de hoy para esta cédula
                     result = conn.execute(
                         text("""
@@ -69,33 +64,45 @@ def asignar_turnos_rapido():
                         AND DATE(fecha_creacion) = CURDATE()
                         ORDER BY fecha_creacion DESC
                         """),
-                        {"cedula": cedula}
+                        {"cedula": documento}
                     )
                     turnos_existentes = result.fetchall()
                     
                     if turnos_existentes:
-                        print(f"📋 Turnos existentes para {cedula}:")
+                        print(f"📋 Turnos existentes para {documento}:")
                         for turno in turnos_existentes:
                             print(f"   - {turno[1]}{turno[2]} | Estado: {turno[3]} | Fecha: {turno[4]}")
                         
                         # Verificar si hay algún turno NO atendido
                         turnos_pendientes = [t for t in turnos_existentes if t[3] in ('espera', 'llamando')]
                         if turnos_pendientes:
-                            print(f"⏭️ Saltando {cedula} - tiene {len(turnos_pendientes)} turno(s) pendiente(s)")
+                            print(f"⏭️ Saltando {documento} - tiene {len(turnos_pendientes)} turno(s) pendiente(s)")
+                            
+                            # Marcar como procesado en control (pero sin asignar turno)
+                            conn.execute(
+                                text("""
+                                UPDATE control_turnos_externos 
+                                SET procesado = TRUE 
+                                WHERE id = :id_control  -- Usar ID específico en lugar de documento
+                                """),
+                                {"id_control": id_control}
+                            )
+                            conn.commit()
                             continue
                         else:
-                            print(f"✅ {cedula} - Todos los turnos están atendidos, puede recibir nuevo turno")
+                            print(f"✅ {documento} - Todos los turnos están atendidos, puede recibir nuevo turno")
                     else:
-                        print(f"✅ {cedula} - No tiene turnos hoy, puede recibir primer turno")
+                        print(f"✅ {documento} - No tiene turnos hoy, puede recibir primer turno")
                         
             except Exception as e:
-                print(f"❌ Error verificando turnos para {cedula}: {e}")
+                print(f"❌ Error verificando turnos para {documento}: {e}")
                 continue
         
         # Si llegamos aquí, puede asignar turno
         modulo = 'A'
         siguiente_numero = obtener_siguiente_turno_lote(modulo)
         turno_formateado = f"{siguiente_numero:03d}"
+        turno_completo = f"{modulo}{turno_formateado}"
         
         if engine:
             try:
@@ -108,16 +115,28 @@ def asignar_turnos_rapido():
                         AND estado IN ('espera', 'llamando')
                         AND DATE(fecha_creacion) = CURDATE()
                         """),
-                        {"cedula": cedula}
+                        {"cedula": documento}
                     )
                     count_pendientes = result.fetchone()[0]
                     
                     if count_pendientes > 0:
-                        print(f"🚫 TRANSACCIÓN BLOQUEADA: {cedula} tiene {count_pendientes} turno(s) pendiente(s)")
+                        print(f"🚫 TRANSACCIÓN BLOQUEADA: {documento} tiene {count_pendientes} turno(s) pendiente(s)")
+                        
+                        # Marcar como procesado en control
+                        conn.execute(
+                            text("""
+                            UPDATE control_turnos_externos 
+                            SET procesado = TRUE 
+                            WHERE id = :id_control  -- Usar ID específico
+                            """),
+                            {"id_control": id_control}
+                        )
+                        conn.commit()
                         continue
                     
-                    print(f"🎫 ASIGNANDO NUEVO TURNO: {modulo}{turno_formateado} para {cedula}")
+                    print(f"🎫 ASIGNANDO NUEVO TURNO: {turno_completo} para {documento} (ID: {id_control})")
                     
+                    # Insertar en tabla principal de turnos
                     conn.execute(
                         text("""
                         INSERT INTO turnos 
@@ -127,18 +146,28 @@ def asignar_turnos_rapido():
                         {
                             "modulo": modulo, 
                             "numero_turno": turno_formateado,
-                            "nombre": nombre_simple,  # ← SOLO NOMBRE1 Y APELLIDO1
-                            "cedula": cedula, 
+                            "nombre": nombre_simple,
+                            "cedula": documento, 
                             "tramite": "Inscripción convocatoria"
                         }
                     )
+                    
+                    # Marcar como procesado en tabla de control
+                    conn.execute(
+                        text("""
+                        UPDATE control_turnos_externos 
+                        SET procesado = TRUE, turno_asignado = :turno, fecha_procesado = NOW()
+                        WHERE id = :id_control  -- Usar ID específico
+                        """),
+                        {"id_control": id_control, "turno": turno_completo}
+                    )
+                    
                     conn.commit()
                     turnos_asignados += 1
-                    print(f"✅✅✅ TURNO ASIGNADO EXITOSAMENTE: {modulo}{turno_formateado} para {cedula}")
+                    print(f"✅✅✅ TURNO ASIGNADO EXITOSAMENTE: {turno_completo} para {documento} (primera persona en llegar)")
                     
             except Exception as e:
-                if "Duplicate" not in str(e):
-                    print(f"❌ Error asignando turno para {cedula}: {e}")
+                print(f"❌ Error asignando turno para {documento}: {e}")
     
     print(f"📊 RESUMEN: {turnos_asignados} turnos asignados en esta ejecución")
     return turnos_asignados
@@ -146,7 +175,7 @@ def asignar_turnos_rapido():
 def llamar_siguiente_turno_con_actualizacion(taquilla):
     """Función que actualiza la lista automáticamente antes de llamar el siguiente turno"""
     
-    # Primero actualizar la lista de turnos
+    # Primero actualizar la lista de turnos (con el orden corregido)
     with st.spinner("🔄 Actualizando lista de turnos..."):
         turnos_asignados = asignar_turnos_rapido()
         if turnos_asignados > 0:
@@ -162,12 +191,13 @@ def llamar_siguiente_turno_con_actualizacion(taquilla):
     
     try:
         with engine.connect() as conn:
+            # Asegurarse de tomar el turno más antiguo (que llegó primero)
             result = conn.execute(
                 text("""
                 SELECT id, modulo, numero_turno, nombre_usuario, tipo_tramite 
                 FROM turnos 
                 WHERE estado = 'espera' 
-                ORDER BY fecha_creacion 
+                ORDER BY fecha_creacion ASC  -- ¡IMPORTANTE! Tomar el más antiguo primero
                 LIMIT 1
                 """)
             )
@@ -185,7 +215,7 @@ def llamar_siguiente_turno_con_actualizacion(taquilla):
                 conn.commit()
                 
                 turno_info = f"{turno[1]}{turno[2]}"
-                print(f"📢 Taquilla {taquilla} llamando turno: {turno_info}")
+                print(f"📢 Taquilla {taquilla} llamando turno: {turno_info} (más antiguo)")
                 return turno_info, turno[0], f"✅ Turno {turno_info} asignado a {taquilla}"
             else:
                 print(f"ℹ️ Taquilla {taquilla}: No hay turnos en espera")
@@ -269,8 +299,8 @@ if 'auto_assigned' not in st.session_state:
         else:
             st.error("❌ Error de conexión")
         
-        st.write("👥 Consultando personas sin turno...")
-        personas = obtener_personas_sin_turno()
+        st.write("👥 Sincronizando con lista externa...")
+        personas = sincronizar_y_obtener_personas_ordenadas()
         st.write(f"📊 {len(personas)} personas encontradas en la lista")
         
         st.write("🎫 Asignando turnos automáticamente...")
@@ -321,7 +351,7 @@ with col2:
 st.markdown("---")
 
 # Obtener estado actual de turnos
-personas_sin_turno = obtener_personas_sin_turno()
+personas_sin_turno = sincronizar_y_obtener_personas_ordenadas()
 turnos_por_estado = obtener_turnos_por_estado()
 
 # Separar turnos por estado
@@ -333,7 +363,7 @@ col_stat1, col_stat2, col_stat3 = st.columns(3)
 with col_stat1:
     st.metric("⏳ Turnos en espera", len(turnos_espera))
 with col_stat2:
-    st.metric("📢 Turnos llamados", len(turnos_llamando))
+    st.metric("📢 Turnos en atención", len(turnos_llamando))
     
 
 st.markdown("---")

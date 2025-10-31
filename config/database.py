@@ -60,106 +60,163 @@ def get_external_db_engine():
             return None
     return st.session_state.external_engine
 
+def verificar_tabla_control():
+    """Verifica que la tabla de control exista, si no, la crea"""
+    engine = get_db_engine()
+    if not engine:
+        return False
+    
+    try:
+        with engine.connect() as conn:
+            # Verificar si la tabla existe
+            result = conn.execute(
+                text("""
+                SELECT COUNT(*) FROM information_schema.tables 
+                WHERE table_schema = 'analitica_fondos' 
+                AND table_name = 'control_turnos_externos'
+                """)
+            )
+            tabla_existe = result.fetchone()[0] > 0
+            
+            if not tabla_existe:
+                print("🔄 La tabla control_turnos_externos no existe, creándola...")
+                # Crear solo la tabla de control
+                create_control_query = text("""
+                CREATE TABLE IF NOT EXISTS control_turnos_externos (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    nombre1 VARCHAR(100),
+                    nombre2 VARCHAR(100),
+                    apellido1 VARCHAR(100),
+                    apellido2 VARCHAR(100),
+                    documento VARCHAR(20) NOT NULL,
+                    tema_solicitud VARCHAR(100),
+                    fecha_lectura TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    procesado BOOLEAN DEFAULT FALSE,
+                    turno_asignado VARCHAR(20),
+                    fecha_procesado TIMESTAMP NULL,
+                    INDEX idx_documento (documento),
+                    INDEX idx_procesado (procesado),
+                    INDEX idx_fecha_lectura (fecha_lectura),
+                    INDEX idx_documento_fecha (documento, fecha_lectura)
+                )
+                """)
+                conn.execute(create_control_query)
+                conn.commit()
+                print("✅ Tabla 'control_turnos_externos' creada exitosamente")
+            else:
+                print("✅ Tabla control_turnos_externos verificada")
+            
+            return True
+            
+    except SQLAlchemyError as e:
+        print(f"❌ Error verificando tabla control: {e}")
+        return False
+
+def sincronizar_y_obtener_personas_ordenadas():
+    """
+    1. Sincroniza la vista externa con nuestra tabla de control
+    2. Devuelve personas NO procesadas en ORDEN DE LLEGADA
+    """
+    # Primero verificar que la tabla de control existe
+    if not verificar_tabla_control():
+        return []
+    
+    engine_ext = get_external_db_engine()
+    engine_main = get_db_engine()
+    
+    if not engine_ext or not engine_main:
+        return []
+    
+    try:
+        # PASO 1: Obtener TODOS los registros de hoy de la vista externa
+        with engine_ext.connect() as conn_ext:
+            query_todos = text(f"""
+            SELECT 
+                nombre1, nombre2, apellido1, apellido2, documento, tema_de_solicitud
+            FROM {EXTERNAL_TABLE_NAME}
+            WHERE fecha = CURDATE()
+            AND tema_de_solicitud = 'Inscripción convocatoria'
+            """)
+            
+            result_todos = conn_ext.execute(query_todos)
+            todos_registros = result_todos.fetchall()
+            print(f"👥 Total de registros en vista externa: {len(todos_registros)}")
+        
+        # PASO 2: Para cada registro, verificar si ya existe en control e insertar si no existe
+        nuevos_count = 0
+        with engine_main.connect() as conn_main:
+            for registro in todos_registros:
+                documento = registro[4]
+                if not documento:
+                    continue
+                
+                # Verificar si ya existe en control_turnos_externos HOY
+                result_existe = conn_main.execute(
+                    text("""
+                    SELECT COUNT(*) FROM control_turnos_externos 
+                    WHERE documento = :documento 
+                    AND DATE(fecha_lectura) = CURDATE()
+                    """),
+                    {"documento": documento}
+                )
+                existe = result_existe.fetchone()[0] > 0
+                
+                if not existe:
+                    try:
+                        conn_main.execute(
+                            text("""
+                            INSERT INTO control_turnos_externos 
+                            (nombre1, nombre2, apellido1, apellido2, documento, tema_solicitud)
+                            VALUES (:nombre1, :nombre2, :apellido1, :apellido2, :documento, :tema)
+                            """),
+                            {
+                                "nombre1": registro[0], "nombre2": registro[1],
+                                "apellido1": registro[2], "apellido2": registro[3],
+                                "documento": documento, "tema": registro[5]
+                            }
+                        )
+                        nuevos_count += 1
+                        print(f"📥 Nuevo registro en control: {documento}")
+                    except Exception as e:
+                        if "Duplicate" not in str(e):
+                            print(f"❌ Error insertando en control: {e}")
+            
+            if nuevos_count > 0:
+                conn_main.commit()
+                print(f"✅ Sincronización completada: {nuevos_count} registros nuevos")
+        
+        # PASO 3: Obtener personas NO procesadas en ORDEN CORRECTO DE LLEGADA
+        with engine_main.connect() as conn_main:
+            query_pendientes = text("""
+            SELECT 
+                id, nombre1, nombre2, apellido1, apellido2, documento, tema_solicitud
+            FROM control_turnos_externos
+            WHERE DATE(fecha_lectura) = CURDATE()
+            AND procesado = FALSE
+            ORDER BY id DESC  -- ¡CORREGIDO! Ordenar por ID DESCENDENTE (los más altos = más antiguos primero)
+            LIMIT 50
+            """)
+            
+            result_pendientes = conn_main.execute(query_pendientes)
+            personas_pendientes = result_pendientes.fetchall()
+            
+            # Mostrar el orden en que se van a procesar
+            if personas_pendientes:
+                print("📋 ORDEN DE PROCESAMIENTO (primero los más antiguos):")
+                for i, persona in enumerate(personas_pendientes):
+                    print(f"   {i+1}. ID: {persona[0]} - Documento: {persona[5]} (Llegó primero)")
+            
+            print(f"👥 Personas pendientes por turno (ordenadas por llegada): {len(personas_pendientes)}")
+            
+            return personas_pendientes
+            
+    except SQLAlchemyError as e:
+        print(f"❌ Error en sincronización: {e}")
+        return []
+
 def obtener_personas_sin_turno():
-    """Obtiene personas con cache thread-safe - Detecta reingresos legítimos"""
-    with _cache['lock']:
-        now = datetime.now()
-        
-        if (_cache['last_check'] and 
-            (now - _cache['last_check']).seconds < _cache['cache_duration'] and
-            _cache['personas_cache']):
-            return _cache['personas_cache']
-        
-        engine = get_external_db_engine()
-        if not engine:
-            return []
-        
-        try:
-            with engine.connect() as conn:
-                # Contar apariciones por cédula en la vista externa HOY
-                query_count = text(f"""
-                SELECT documento, COUNT(*) as apariciones
-                FROM {EXTERNAL_TABLE_NAME}
-                WHERE DATE(fecha) = CURDATE()
-                AND tema_de_solicitud = 'Inscripción convocatoria'
-                GROUP BY documento
-                """)
-                
-                result_count = conn.execute(query_count)
-                conteo_apariciones = {row[0]: row[1] for row in result_count}
-                
-                # Obtener todas las personas
-                query_personas = text(f"""
-                SELECT 
-                    nombre1, nombre2, apellido1, apellido2, documento, tema_de_solicitud
-                FROM {EXTERNAL_TABLE_NAME}
-                WHERE DATE(fecha) = CURDATE()
-                AND tema_de_solicitud = 'Inscripción convocatoria'
-                LIMIT 100
-                """)
-                
-                result_personas = conn.execute(query_personas)
-                todas_personas = result_personas.fetchall()
-                
-                # FILTRAR con lógica de reingreso
-                engine_main = get_db_engine()
-                personas_filtradas = []
-                
-                if engine_main:
-                    with engine_main.connect() as conn_main:
-                        for persona in todas_personas:
-                            documento = persona[4]
-                            if not documento:
-                                continue
-                            
-                            # SOLO USAR NOMBRE1 Y APELLIDO1
-                            nombre1 = persona[0].strip() if persona[0] else ''
-                            apellido1 = persona[2].strip() if persona[2] else ''
-                            
-                            # Crear nueva tupla con solo los datos necesarios
-                            persona_simple = (
-                                nombre1, '', apellido1, '',  # Solo nombre1 y apellido1, los demás vacíos
-                                documento, persona[5]
-                            )
-                                
-                            # Verificar en nuestra base de datos
-                            result_turnos = conn_main.execute(
-                                text("""
-                                SELECT COUNT(*) as turnos_hoy 
-                                FROM turnos 
-                                WHERE cedula_usuario = :cedula 
-                                AND DATE(fecha_creacion) = CURDATE()
-                                """),
-                                {"cedula": documento}
-                            )
-                            turnos_existentes = result_turnos.fetchone()[0]
-                            
-                            apariciones_externas = conteo_apariciones.get(documento, 0)
-                            
-                            # LÓGICA DE REINGRESO:
-                            if turnos_existentes == 0:
-                                # Nuevo ingreso - asignar siempre
-                                personas_filtradas.append(persona_simple)
-                                print(f"✅ NUEVO: {documento} - Primer turno del día")
-                                
-                            elif apariciones_externas > turnos_existentes:
-                                # Reingreso legítimo - necesita nuevo turno
-                                personas_filtradas.append(persona_simple)
-                                print(f"✅ REINGRESO: {documento} - Apariciones: {apariciones_externas} vs Turnos: {turnos_existentes}")
-                                
-                            else:
-                                # Posible duplicado - no asignar
-                                print(f"⏭️ DUPLICADO: {documento} - Ya tiene {turnos_existentes} turno(s), apariciones: {apariciones_externas}")
-                
-                _cache['last_check'] = now
-                _cache['personas_cache'] = personas_filtradas
-                
-                print(f"👥 Filtrado: {len(todas_personas)} → {len(personas_filtradas)} personas para asignar")
-                return personas_filtradas
-                
-        except SQLAlchemyError as e:
-            print(f"❌ Error obteniendo personas: {e}")
-            return []
+    """Función mantenida para compatibilidad - ahora usa la nueva tabla de control"""
+    return sincronizar_y_obtener_personas_ordenadas()
 
 def ya_tiene_turno_pendiente(cedula):
     """Verificación optimizada con cache por sesión"""
@@ -218,7 +275,7 @@ def asignar_turnos_automaticos_silencioso():
     # Limpiar cache al inicio
     limpiar_cache_personas()
     
-    personas = obtener_personas_sin_turno()
+    personas = sincronizar_y_obtener_personas_ordenadas()
     if not personas:
         return 0
     
@@ -283,6 +340,18 @@ def asignar_turnos_automaticos_silencioso():
                             "nombre": nombre_simple, "cedula": cedula, "tramite": tipo_solicitud
                         }
                     )
+                    
+                    # Marcar como procesado en tabla de control
+                    conn.execute(
+                        text("""
+                        UPDATE control_turnos_externos 
+                        SET procesado = TRUE, turno_asignado = :turno, fecha_procesado = NOW()
+                        WHERE documento = :documento 
+                        AND DATE(fecha_lectura) = CURDATE()
+                        """),
+                        {"documento": cedula, "turno": f"{modulo}{turno_formateado}"}
+                    )
+                    
                     conn.commit()
                     turnos_asignados += 1
                     print(f"✅ Turno automático: {modulo}{turno_formateado} para {cedula}")
@@ -293,7 +362,6 @@ def asignar_turnos_automaticos_silencioso():
     
     return turnos_asignados
 
-# En la función obtener_turnos_en_espera, cambiamos la consulta:
 def obtener_turnos_por_estado():
     """Obtiene todos los turnos agrupados por estado"""
     engine = get_db_engine()
@@ -320,8 +388,6 @@ def obtener_turnos_por_estado():
             print(f"❌ Error obteniendo turnos por estado: {e}")
             return []
     return []
-
-# Agregar estas funciones al database.py
 
 def taquilla_tiene_turno_activo(taquilla):
     """Verifica si una taquilla ya tiene un turno en estado 'llamando'"""
@@ -422,6 +488,10 @@ def init_database():
     if engine:
         try:
             with engine.connect() as conn:
+                # Asegurarnos de usar la base de datos correcta
+                conn.execute(text("USE analitica_fondos"))
+                
+                # Tabla de turnos principal
                 create_table_query = text("""
                 CREATE TABLE IF NOT EXISTS turnos (
                     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -440,8 +510,33 @@ def init_database():
                 )
                 """)
                 conn.execute(create_table_query)
+                print("✅ Tabla 'turnos' verificada en analitica_fondos")
+                
+                # NUEVA: Tabla de control para capturar el orden de llegada
+                create_control_query = text("""
+                CREATE TABLE IF NOT EXISTS control_turnos_externos (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    nombre1 VARCHAR(100),
+                    nombre2 VARCHAR(100),
+                    apellido1 VARCHAR(100),
+                    apellido2 VARCHAR(100),
+                    documento VARCHAR(20) NOT NULL,
+                    tema_solicitud VARCHAR(100),
+                    fecha_lectura TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    procesado BOOLEAN DEFAULT FALSE,
+                    turno_asignado VARCHAR(20),
+                    fecha_procesado TIMESTAMP NULL,
+                    INDEX idx_documento (documento),
+                    INDEX idx_procesado (procesado),
+                    INDEX idx_fecha_lectura (fecha_lectura),
+                    INDEX idx_documento_fecha (documento, fecha_lectura)
+                )
+                """)
+                conn.execute(create_control_query)
+                print("✅ Tabla 'control_turnos_externos' creada en analitica_fondos")
+                
                 conn.commit()
-                print("✅ Tabla 'turnos' creada/verificada correctamente en analitica_fondos")
+                print("✅✅ Todas las tablas inicializadas correctamente en analitica_fondos")
                 
         except SQLAlchemyError as e:
             print(f"❌ Error inicializando base de datos: {e}")
