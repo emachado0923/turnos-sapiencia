@@ -13,6 +13,10 @@ from datetime import datetime
 
 setup_page_config("Interfaz de Taquillas", "wide")
 
+# Al inicio de la página, después de setup_page_config
+from config.database import verificar_sincronizacion
+verificar_sincronizacion()
+
 def asignar_turnos_rapido():
     """Función rápida para asignar turnos - USANDO TABLA DE CONTROL"""
     from config.database import limpiar_cache_personas
@@ -32,9 +36,10 @@ def asignar_turnos_rapido():
     print(f"🔍 Procesando {len(personas)} personas en ORDEN CORRECTO DE LLEGADA")
     
     for persona in personas:
-        # Ahora persona[0] es el ID, persona[5] es el documento, etc.
+        # Ahora persona[0] es el ID, persona[5] es el documento, persona[6] es el tema_solicitud
         id_control = persona[0]  # ID de la tabla de control
         documento = persona[5]   # Documento en posición [5]
+        tema_solicitud = persona[6]  # Tema de solicitud en posición [6]
         
         # MANEJO SEGURO DE VALORES NULOS para nombres
         nombre1 = str(persona[1]) if persona[1] is not None else ''
@@ -49,7 +54,7 @@ def asignar_turnos_rapido():
         # Construir nombre simple: nombre1 + apellido1
         nombre_simple = f"{nombre1} {apellido1}".strip()
         
-        print(f"🔍 Procesando: ID {id_control} - Documento: {documento} - {nombre_simple}")
+        print(f"🔍 Procesando: ID {id_control} - Documento: {documento} - {nombre_simple} - Solicitud: {tema_solicitud}")
         
         # VERIFICACIÓN DETALLADA en turnos principales
         if engine:
@@ -99,7 +104,12 @@ def asignar_turnos_rapido():
                 continue
         
         # Si llegamos aquí, puede asignar turno
-        modulo = 'A'
+        # DETERMINAR MÓDULO SEGÚN TEMA DE SOLICITUD
+        if tema_solicitud == 'Legalización fondo':
+            modulo = 'P'
+        else:  # 'Inscripción convocatoria' o cualquier otro
+            modulo = 'A'
+            
         siguiente_numero = obtener_siguiente_turno_lote(modulo)
         turno_formateado = f"{siguiente_numero:03d}"
         turno_completo = f"{modulo}{turno_formateado}"
@@ -134,7 +144,7 @@ def asignar_turnos_rapido():
                         conn.commit()
                         continue
                     
-                    print(f"🎫 ASIGNANDO NUEVO TURNO: {turno_completo} para {documento} (ID: {id_control})")
+                    print(f"🎫 ASIGNANDO NUEVO TURNO: {turno_completo} para {documento} (ID: {id_control}) - {tema_solicitud}")
                     
                     # Insertar en tabla principal de turnos
                     conn.execute(
@@ -148,7 +158,7 @@ def asignar_turnos_rapido():
                             "numero_turno": turno_formateado,
                             "nombre": nombre_simple,
                             "cedula": documento, 
-                            "tramite": "Inscripción convocatoria"
+                            "tramite": tema_solicitud  # Usar el tema de solicitud real
                         }
                     )
                     
@@ -164,7 +174,7 @@ def asignar_turnos_rapido():
                     
                     conn.commit()
                     turnos_asignados += 1
-                    print(f"✅✅✅ TURNO ASIGNADO EXITOSAMENTE: {turno_completo} para {documento} (primera persona en llegar)")
+                    print(f"✅✅✅ TURNO ASIGNADO EXITOSAMENTE: {turno_completo} para {documento} ({tema_solicitud})")
                     
             except Exception as e:
                 print(f"❌ Error asignando turno para {documento}: {e}")

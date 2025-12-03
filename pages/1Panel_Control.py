@@ -7,10 +7,11 @@ from sqlalchemy import text
 setup_page_config("Panel de Control - Registro", "wide")
 
 # Configuración de módulos SOLO para clasificación
+# Configuración de módulos SOLO para clasificación
 MODULOS_CONFIG = {
-    "A": "Atención General",
+    "A": "Inscripción Convocatoria",
+    "P": "Legalización Fondo",  # Actualizado
     "L": "Libranzas", 
-    "P": "Pagos",
     "C": "Consultas",
     "S": "Soporte Técnico"
 }

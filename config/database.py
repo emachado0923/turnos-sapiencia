@@ -128,36 +128,60 @@ def sincronizar_y_obtener_personas_ordenadas():
         return []
     
     try:
+        # Obtener fecha actual en formato YYYY-MM-DD
+        fecha_actual = datetime.now().strftime('%Y-%m-%d')
+        fecha_actual_formato_vista = datetime.now().strftime('%d/%m/%Y')  # Formato común para vistas
+        
+        print(f"📅 Buscando registros para hoy: {fecha_actual_formato_vista} (formato vista)")
+        
         # PASO 1: Obtener TODOS los registros de hoy de la vista externa
         with engine_ext.connect() as conn_ext:
+            # Intentar diferentes formatos de fecha
             query_todos = text(f"""
             SELECT 
                 nombre1, nombre2, apellido1, apellido2, documento, tema_de_solicitud
             FROM {EXTERNAL_TABLE_NAME}
-            WHERE fecha = CURDATE()
-            AND tema_de_solicitud = 'Inscripción convocatoria'
+            WHERE (fecha = :fecha1 OR fecha = :fecha2 OR fecha = :fecha3)
+            AND tema_de_solicitud IN ('Inscripción convocatoria', 'Legalización fondo')  -- MODIFICADO: 'fondo' singular
             """)
             
-            result_todos = conn_ext.execute(query_todos)
+            # Probar diferentes formatos de fecha
+            fecha_formato1 = datetime.now().strftime('%d/%m/%Y')  # DD/MM/YYYY
+            fecha_formato2 = datetime.now().strftime('%Y-%m-%d')  # YYYY-MM-DD
+            fecha_formato3 = datetime.now().strftime('%d-%m-%Y')  # DD-MM-YYYY
+            
+            result_todos = conn_ext.execute(query_todos, {
+                "fecha1": fecha_formato1,
+                "fecha2": fecha_formato2, 
+                "fecha3": fecha_formato3
+            })
+            
             todos_registros = result_todos.fetchall()
             print(f"👥 Total de registros en vista externa: {len(todos_registros)}")
+            
+            if todos_registros:
+                for registro in todos_registros:
+                    print(f"   - Documento: {registro[4]}, Tema: {registro[5]}")
         
         # PASO 2: Para cada registro, verificar si ya existe en control e insertar si no existe
         nuevos_count = 0
         with engine_main.connect() as conn_main:
             for registro in todos_registros:
                 documento = registro[4]
+                tema_solicitud = registro[5]
+                
                 if not documento:
                     continue
                 
-                # Verificar si ya existe en control_turnos_externos HOY
+                # Verificar si ya existe en control_turnos_externos HOY con el mismo tema
                 result_existe = conn_main.execute(
                     text("""
                     SELECT COUNT(*) FROM control_turnos_externos 
                     WHERE documento = :documento 
                     AND DATE(fecha_lectura) = CURDATE()
+                    AND tema_solicitud = :tema_solicitud
                     """),
-                    {"documento": documento}
+                    {"documento": documento, "tema_solicitud": tema_solicitud}
                 )
                 existe = result_existe.fetchone()[0] > 0
                 
@@ -170,16 +194,19 @@ def sincronizar_y_obtener_personas_ordenadas():
                             VALUES (:nombre1, :nombre2, :apellido1, :apellido2, :documento, :tema)
                             """),
                             {
-                                "nombre1": registro[0], "nombre2": registro[1],
-                                "apellido1": registro[2], "apellido2": registro[3],
-                                "documento": documento, "tema": registro[5]
+                                "nombre1": registro[0] or '', 
+                                "nombre2": registro[1] or '',
+                                "apellido1": registro[2] or '', 
+                                "apellido2": registro[3] or '',
+                                "documento": documento, 
+                                "tema": tema_solicitud
                             }
                         )
                         nuevos_count += 1
-                        print(f"📥 Nuevo registro en control: {documento}")
+                        print(f"📥 Nuevo registro en control: {documento} - {tema_solicitud}")
                     except Exception as e:
                         if "Duplicate" not in str(e):
-                            print(f"❌ Error insertando en control: {e}")
+                            print(f"❌ Error insertando en control para {documento}: {e}")
             
             if nuevos_count > 0:
                 conn_main.commit()
@@ -193,7 +220,7 @@ def sincronizar_y_obtener_personas_ordenadas():
             FROM control_turnos_externos
             WHERE DATE(fecha_lectura) = CURDATE()
             AND procesado = FALSE
-            ORDER BY id DESC  -- ¡CORREGIDO! Ordenar por ID DESCENDENTE (los más altos = más antiguos primero)
+            ORDER BY id DESC
             LIMIT 50
             """)
             
@@ -204,9 +231,9 @@ def sincronizar_y_obtener_personas_ordenadas():
             if personas_pendientes:
                 print("📋 ORDEN DE PROCESAMIENTO (primero los más antiguos):")
                 for i, persona in enumerate(personas_pendientes):
-                    print(f"   {i+1}. ID: {persona[0]} - Documento: {persona[5]} (Llegó primero)")
+                    print(f"   {i+1}. ID: {persona[0]} - {persona[5]} - {persona[6]}")
             
-            print(f"👥 Personas pendientes por turno (ordenadas por llegada): {len(personas_pendientes)}")
+            print(f"👥 Personas pendientes por turno: {len(personas_pendientes)}")
             
             return personas_pendientes
             
@@ -288,7 +315,7 @@ def asignar_turnos_automaticos_silencioso():
             persona_dict = {
                 'nombre1': persona[0], 'nombre2': persona[1],
                 'apellido1': persona[2], 'apellido2': persona[3],
-                'documento': persona[4], 'tema_de_solicitud': persona[5]
+                'documento': persona[4], 'tema_solicitud': persona[5]  # Nota: aquí es tema_solicitud
             }
         
         # SOLO GUARDAR NOMBRE1 Y APELLIDO1
@@ -299,7 +326,7 @@ def asignar_turnos_automaticos_silencioso():
         nombre_simple = f"{nombre1} {apellido1}".strip()
         
         cedula = persona_dict.get('documento', '')
-        tipo_solicitud = persona_dict.get('tema_de_solicitud', 'Inscripción convocatoria')
+        tipo_solicitud = persona_dict.get('tema_solicitud', '')  # Cambiado de tema_de_solicitud a tema_solicitud
         
         if not cedula:
             continue
@@ -308,7 +335,12 @@ def asignar_turnos_automaticos_silencioso():
         if ya_tiene_turno_pendiente_robusto(cedula):
             continue
         
-        modulo = 'A'
+        # DETERMINAR MÓDULO SEGÚN TEMA DE SOLICITUD
+        if tipo_solicitud == 'Legalización fondo':
+            modulo = 'P'
+        else:  # 'Inscripción convocatoria' o cualquier otro
+            modulo = 'A'
+        
         siguiente_numero = obtener_siguiente_turno_lote(modulo)
         turno_formateado = f"{siguiente_numero:03d}"
         
@@ -354,13 +386,67 @@ def asignar_turnos_automaticos_silencioso():
                     
                     conn.commit()
                     turnos_asignados += 1
-                    print(f"✅ Turno automático: {modulo}{turno_formateado} para {cedula}")
+                    print(f"✅ Turno automático: {modulo}{turno_formateado} para {cedula} ({tipo_solicitud})")
                     
             except SQLAlchemyError as e:
                 if "Duplicate" not in str(e):
                     print(f"❌ Error asignando turno: {e}")
     
     return turnos_asignados
+
+def verificar_sincronizacion():
+    """Función para depurar la sincronización"""
+    engine_ext = get_external_db_engine()
+    engine_main = get_db_engine()
+    
+    if not engine_ext or not engine_main:
+        print("❌ No se pudo conectar a las bases de datos")
+        return
+    
+    try:
+        # Obtener fecha actual en diferentes formatos
+        fecha_formato1 = datetime.now().strftime('%d/%m/%Y')
+        fecha_formato2 = datetime.now().strftime('%Y-%m-%d')
+        fecha_formato3 = datetime.now().strftime('%d-%m-%Y')
+        
+        print(f"🔍 Verificando sincronización para hoy:")
+        print(f"   - Formato 1: {fecha_formato1}")
+        print(f"   - Formato 2: {fecha_formato2}")
+        print(f"   - Formato 3: {fecha_formato3}")
+        
+        # Ver vista externa
+        with engine_ext.connect() as conn:
+            query = text(f"""
+            SELECT fecha, documento, tema_de_solicitud 
+            FROM {EXTERNAL_TABLE_NAME}
+            WHERE tema_de_solicitud IN ('Inscripción convocatoria', 'Legalización fondo')
+            ORDER BY fecha DESC
+            LIMIT 20
+            """)
+            result = conn.execute(query)
+            registros = result.fetchall()
+            
+            print(f"📋 Registros en vista {EXTERNAL_TABLE_NAME}:")
+            for reg in registros:
+                print(f"   Fecha: {reg[0]}, Doc: {reg[1]}, Tema: {reg[2]}")
+        
+        # Ver tabla de control
+        with engine_main.connect() as conn:
+            query = text("""
+            SELECT documento, tema_solicitud, procesado, fecha_lectura
+            FROM control_turnos_externos 
+            WHERE DATE(fecha_lectura) >= CURDATE() - INTERVAL 1 DAY
+            ORDER BY fecha_lectura DESC
+            """)
+            result = conn.execute(query)
+            registros_control = result.fetchall()
+            
+            print(f"📋 Registros en control_turnos_externos (último día):")
+            for reg in registros_control:
+                print(f"   Doc: {reg[0]}, Tema: {reg[1]}, Procesado: {reg[2]}, Fecha: {reg[3]}")
+                
+    except Exception as e:
+        print(f"❌ Error en verificación: {e}")
 
 def obtener_turnos_por_estado():
     """Obtiene todos los turnos agrupados por estado"""

@@ -254,7 +254,7 @@ main_placeholder = st.empty()
 while True:
     with main_placeholder.container():
         # Encabezado principal
-        st.markdown('<div class="main-header">TURNO INSCRIPCIÓN</div>', unsafe_allow_html=True)
+        st.markdown('<div class="main-header">TURNO PAGARÉ</div>', unsafe_allow_html=True)
         
         # Obtener datos
         turno_actual = obtener_turno_actual()
