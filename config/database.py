@@ -419,7 +419,7 @@ def verificar_sincronizacion():
             query = text(f"""
             SELECT fecha, documento, tema_de_solicitud 
             FROM {EXTERNAL_TABLE_NAME}
-            WHERE tema_de_solicitud IN ('Inscripción convocatoria', 'Legalización fondo')
+            WHERE tema_de_solicitud IN ('Inscripción convocatoria', 'Legalización fondo', 'Información general')
             ORDER BY fecha DESC
             LIMIT 20
             """)
