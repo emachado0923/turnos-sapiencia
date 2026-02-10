@@ -142,7 +142,7 @@ def sincronizar_y_obtener_personas_ordenadas():
                 nombre1, nombre2, apellido1, apellido2, documento, tema_de_solicitud
             FROM {EXTERNAL_TABLE_NAME}
             WHERE (fecha = :fecha1 OR fecha = :fecha2 OR fecha = :fecha3)
-            AND tema_de_solicitud IN ('Inscripción convocatoria', 'Legalización fondo', 'Información general')  -- MODIFICADO: 'fondo' singular
+            AND tema_de_solicitud IN ('Notificaciones')  -- MODIFICADO
             """)
             
             # Probar diferentes formatos de fecha
@@ -338,7 +338,7 @@ def asignar_turnos_automaticos_silencioso():
         # DETERMINAR MÓDULO SEGÚN TEMA DE SOLICITUD
         if tipo_solicitud == 'Legalización fondo':
             modulo = 'P'
-        else:  # 'Inscripción convocatoria' o cualquier otro
+        else:  # Cualquier otro
             modulo = 'A'
         
         siguiente_numero = obtener_siguiente_turno_lote(modulo)
@@ -419,7 +419,7 @@ def verificar_sincronizacion():
             query = text(f"""
             SELECT fecha, documento, tema_de_solicitud 
             FROM {EXTERNAL_TABLE_NAME}
-            WHERE tema_de_solicitud IN ('Inscripción convocatoria', 'Legalización fondo', 'Información general')
+            WHERE tema_de_solicitud IN ('Notificaciones')
             ORDER BY fecha DESC
             LIMIT 20
             """)
