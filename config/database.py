@@ -142,7 +142,7 @@ def sincronizar_y_obtener_personas_ordenadas():
                 nombre1, nombre2, apellido1, apellido2, documento, tema_de_solicitud
             FROM {EXTERNAL_TABLE_NAME}
             WHERE (fecha = :fecha1 OR fecha = :fecha2 OR fecha = :fecha3)
-            AND tema_de_solicitud IN ('Inscripción convocatoria', 'Legalización fondo')  -- MODIFICADO: 'fondo' singular
+            AND tema_de_solicitud IN ('Inscripción convocatoria', 'Legalización fondo', 'Información general')  -- MODIFICADO: 'fondo' singular
             """)
             
             # Probar diferentes formatos de fecha
