@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 from config.database import (
     get_db_engine, obtener_turnos_por_estado, 
-    sincronizar_y_obtener_personas_ordenadas, asignar_turnos_automaticos_silencioso,
+    sincronizar_y_obtener_personas_ordenadas,
     taquilla_tiene_turno_activo, obtener_turno_activo_taquilla,
     ya_tiene_turno_pendiente, obtener_siguiente_turno_lote,
     ya_tiene_turno_pendiente_robusto, limpiar_cache_personas
