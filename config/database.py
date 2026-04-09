@@ -276,8 +276,36 @@ def ya_tiene_turno_pendiente(cedula):
         print(f"❌ Error verificando turno: {e}")
         return False
 
+def inicializar_contadores_turnos():
+    """Inicializa los contadores en cero para módulos nuevos - NO sincroniza con histórico"""
+    engine = get_db_engine()
+    if not engine:
+        return False
+    
+    try:
+        modulos = ["A", "P", "L", "C", "S"]
+        with engine.connect() as conn:
+            with conn.begin():
+                for modulo in modulos:
+                    # Verificar si el contador existe
+                    result = conn.execute(
+                        text("SELECT COUNT(*) FROM contadores_turnos WHERE modulo = :modulo"),
+                        {"modulo": modulo}
+                    )
+                    if result.fetchone()[0] == 0:
+                        # Crear contador en cero - SIN sincronizar con histórico
+                        conn.execute(
+                            text("INSERT INTO contadores_turnos (modulo, ultimo_turno, fecha_reseteo) VALUES (:modulo, 0, NOW())"),
+                            {"modulo": modulo}
+                        )
+                        print(f"✅ Contador inicializado para módulo {modulo}: Último turno = 0")
+        return True
+    except SQLAlchemyError as e:
+        print(f"❌ Error inicializando contadores: {e}")
+        return False
+
 def obtener_siguiente_turno_lote(modulo):
-    """Obtiene números de turno con manejo de concurrencia"""
+    """Obtiene y incrementa el siguiente número de turno del contador"""
     engine = get_db_engine()
     if not engine:
         return 1
@@ -286,18 +314,105 @@ def obtener_siguiente_turno_lote(modulo):
         with engine.connect() as conn:
             # Usar transacción para evitar condiciones de carrera
             with conn.begin():
+                # Obtener el siguiente turno
                 result = conn.execute(
-                    text("SELECT MAX(CAST(numero_turno AS UNSIGNED)) FROM turnos WHERE modulo = :modulo"),
+                    text("SELECT ultimo_turno FROM contadores_turnos WHERE modulo = :modulo"),
                     {"modulo": modulo}
                 )
-                resultado = result.fetchone()
-                return resultado[0] + 1 if resultado[0] is not None else 1
+                row = result.fetchone()
+                
+                if not row:
+                    # Si no existe contador, crearlo
+                    conn.execute(
+                        text("INSERT INTO contadores_turnos (modulo, ultimo_turno) VALUES (:modulo, 0)"),
+                        {"modulo": modulo}
+                    )
+                    siguiente_numero = 1
+                else:
+                    siguiente_numero = row[0] + 1
+                
+                # Actualizar el contador
+                conn.execute(
+                    text("UPDATE contadores_turnos SET ultimo_turno = :numero WHERE modulo = :modulo"),
+                    {"numero": siguiente_numero, "modulo": modulo}
+                )
+                
+                return siguiente_numero
                 
     except SQLAlchemyError as e:
         print(f"Error obteniendo turno: {e}")
         return 1
 
-def asignar_turnos_automaticos_silencioso():
+def desbloquear_contadores_turnos(modulo=None):
+    """
+    Desbloquea los contadores para permitir sincronización automática
+    Si modulo es None, desbloquea TODOS los módulos
+    Retorna True si fue exitoso
+    """
+    engine = get_db_engine()
+    if not engine:
+        print("❌ No hay conexión a la base de datos")
+        return False
+    
+    try:
+        with engine.connect() as conn:
+            if modulo:
+                # Desbloquear un módulo específico
+                conn.execute(
+                    text("UPDATE contadores_turnos SET manual_reset = FALSE WHERE modulo = :modulo"),
+                    {"modulo": modulo}
+                )
+                conn.commit()
+                print(f"✅ Contador del módulo {modulo} desbloqueado")
+            else:
+                # Desbloquear todos los módulos
+                conn.execute(
+                    text("UPDATE contadores_turnos SET manual_reset = FALSE")
+                )
+                conn.commit()
+                print("✅ Todos los contadores han sido desbloqueados")
+            
+            return True
+            
+    except SQLAlchemyError as e:
+        print(f"❌ Error desbloqueando contadores: {e}")
+        return False
+
+def resetear_contadores_turnos(modulo=None):
+    """
+    Resetea los contadores de turnos a cero
+    Si modulo es None, resetea TODOS los módulos
+    Retorna True si fue exitoso
+    """
+    engine = get_db_engine()
+    if not engine:
+        print("❌ No hay conexión a la base de datos")
+        return False
+    
+    try:
+        with engine.connect() as conn:
+            if modulo:
+                # Resetear un módulo específico
+                conn.execute(
+                    text("UPDATE contadores_turnos SET ultimo_turno = 0, fecha_reseteo = NOW() WHERE modulo = :modulo"),
+                    {"modulo": modulo}
+                )
+                conn.commit()
+                print(f"✅ Contador del módulo {modulo} reseteado a 0")
+            else:
+                # Resetear todos los módulos
+                conn.execute(
+                    text("UPDATE contadores_turnos SET ultimo_turno = 0, fecha_reseteo = NOW()")
+                )
+                conn.commit()
+                print("✅ Todos los contadores han sido reseteados a 0")
+            
+            print(f"📅 Fecha/Hora del reseteo: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            return True
+            
+    except SQLAlchemyError as e:
+        print(f"❌ Error reseteando contadores: {e}")
+        return False
     """Versión silenciosa para asignación automática en background"""
     # Limpiar cache al inicio
     limpiar_cache_personas()
@@ -621,8 +736,24 @@ def init_database():
                 conn.execute(create_control_query)
                 print("✅ Tabla 'control_turnos_externos' creada en analitica_fondos")
                 
+                # NUEVA: Tabla de contadores para gestionar números de turnos
+                create_contadores_query = text("""
+                CREATE TABLE IF NOT EXISTS contadores_turnos (
+                    modulo VARCHAR(10) NOT NULL PRIMARY KEY,
+                    ultimo_turno INT DEFAULT 0,
+                    fecha_reseteo TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    manual_reset BOOLEAN DEFAULT FALSE,
+                    INDEX idx_modulo (modulo)
+                )
+                """)
+                conn.execute(create_contadores_query)
+                print("✅ Tabla 'contadores_turnos' creada en analitica_fondos")
+                
                 conn.commit()
                 print("✅✅ Todas las tablas inicializadas correctamente en analitica_fondos")
+                
+                # Inicializar contadores para cada módulo si no existen
+                inicializar_contadores_turnos()
                 
         except SQLAlchemyError as e:
             print(f"❌ Error inicializando base de datos: {e}")

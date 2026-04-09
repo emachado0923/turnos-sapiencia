@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from config.database import get_db_engine, obtener_siguiente_turno_lote
+from config.database import get_db_engine, obtener_siguiente_turno_lote, resetear_contadores_turnos, inicializar_contadores_turnos, desbloquear_contadores_turnos
 from utils.helpers import setup_page_config
 from sqlalchemy import text
 
@@ -145,3 +145,60 @@ if engine:
         st.error(f"Error cargando últimos turnos: {e}")
         # Mostrar error detallado para debugging
         st.error(f"Detalle del error: {str(e)}")
+
+# ============================================================================
+# SECCIÓN DE ADMINISTRACIÓN Y RESETEO
+# ============================================================================
+
+st.markdown("---")
+st.subheader("⚙️ Administración")
+
+# Crear expandible para no saturar la pantalla
+with st.expander("🔧 Herramientas de mantenimiento", expanded=False):
+    
+    st.info("🔄 **Resetear contadores** - Inicia numeración desde 001")
+    st.subheader("📊 Contadores actuales:", divider=True)
+
+    # Mostrar estado actual de los contadores SIN sincronizar automáticamente
+    engine = get_db_engine()
+    if engine:
+        try:
+            with engine.connect() as conn:
+                result = conn.execute(text("""
+                    SELECT modulo, ultimo_turno, fecha_reseteo
+                    FROM contadores_turnos
+                    ORDER BY modulo
+                """))
+                contadores = result.fetchall()
+                
+                # Mostrar en columnas
+                cols_contador = st.columns(len(contadores))
+                for idx, (modulo, ultimo_turno, fecha_reseteo) in enumerate(contadores):
+                    with cols_contador[idx]:
+                        proximo = ultimo_turno + 1
+                        st.metric(f"Módulo {modulo}", f"{proximo:03d}")
+                        st.caption(f"Último: {ultimo_turno:03d}")
+        except Exception as e:
+            st.error(f"Error cargando contadores: {e}")
+    
+    st.divider()
+
+    confirmacion = st.checkbox(
+        "✅ Confirmar reseteo de contadores a CERO",
+        key="confirm_reset"
+    )
+
+    if confirmacion:
+        if st.button("🚀 Resetear contadores", key="btn_reset", type="secondary"):
+            if resetear_contadores_turnos():
+                st.success("✅ ✅ CONTADORES RESETEADOS A CERO")
+                st.info("💡 Los próximos turnos asignados serán 001, 002, 003...")
+                st.info("📋 Todos los registros de turnos se conservaron en el histórico")
+                st.balloons()
+                
+                # Recargar estadísticas
+                st.rerun()
+            else:
+                st.error("❌ Error durante el reseteo")
+
+    st.divider()
